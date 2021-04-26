@@ -19,7 +19,6 @@ from .exception import DtbBindingError, DtbBindingQueryFormatError, \
     DtbBindingNodeLookupError, DtbBindingSyntaxError, \
     DtbBindingTypeError, DtbBindingNotImplementedError, ParseError
 
-
 class FdtQueryEngine:
     """
     This class is responsible for wrapping around an instance of pyfdt and
@@ -414,12 +413,19 @@ class DtbMatchQuery(Query):
         self.engine = None
 
     @staticmethod
+    def addr_xlat(resolved):
+        # TODO: use 'this-ranges' property to map correctly
+        if (resolved['reg'][0] == 0x7e215040):
+            resolved['reg'][0] = 0xfe215040
+
+    @staticmethod
     def resolve_fdt_node(node):
         resolved = {}
 
         address_cells_key = 'this-address-cells'
         size_cells_key = 'this-size-cells'
         node_path_key = 'this-node-path'
+        ranges_key = 'this-ranges'
 
         # convert the properties we retrieved to a dictionary
         # of property-name: values. If there is more than one
@@ -442,6 +448,9 @@ class DtbMatchQuery(Query):
                 resolved[address_cells_key] = list(values)
             elif key == '#size-cells':
                 resolved[size_cells_key] = list(values)
+            elif key == 'ranges':
+                resolved[ranges_key] = list(values)
+
         # if the parent does have the #address-cells and
         # #size-cells property, default to 2 and 1 respectively
         # as according to the Devicetree spec
@@ -462,6 +471,7 @@ class DtbMatchQuery(Query):
             curr_node = curr_node.parent
         node_path = '/' + node_path
         resolved[node_path_key] = node_path
+        DtbMatchQuery.addr_xlat(resolved)
         return resolved
 
     def resolve(self, args):
