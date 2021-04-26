@@ -8,6 +8,7 @@
 #
 import argparse
 
+import functools
 import os
 import six
 import re
@@ -414,6 +415,133 @@ class DtbMatchQuery(Query):
         self.engine = None
 
     @staticmethod
+    def unpack(data, sizes):
+        result = []
+        while sizes:
+            sz = sizes.pop(0)
+            result.append(functools.reduce(lambda a, b: (a << 32) + b, data[0:sz]))
+            data = data[sz:]
+        return result, data
+
+    @staticmethod
+    def unpacker(data, sizes):
+        while data:
+            result, data = DtbMatchQuery.unpack(data, sizes[:])
+            yield result
+
+    @staticmethod
+    def pack(x, size):
+        result = []
+        if size > 1:
+            result = DtbMatchQuery.pack(x >> 32, size - 1)
+        else:
+            if x >= (1 << 32):
+                raise RuntimeError('value 0x%x does not fit into device tree' % (x))
+        result.append(x & ((1 << 32) - 1))
+        return result
+
+    @staticmethod
+    def xlat_reg(addr, size, buses):
+        for bus in buses:
+            if not 'translations' in bus:
+                continue
+            for xlat in bus['translations']:
+                if addr < xlat['from_start'] or addr > xlat['from_start'] + xlat['size'] - 1:
+                    continue
+                if addr + size > xlat['from_start'] + xlat['size']:
+                    raise RuntimeError('Region 0x%x/0x%x does not fit into range 0x%x/0x%x'
+                        % (addr, size, xlat['from_start'], xlat['size']))
+                    continue
+                addr = xlat['to_start'] + (addr - xlat['from_start'])
+                break
+        return addr
+
+    @staticmethod
+    def xlat_regs(cells):
+        if not 'reg' in cells:
+            return
+
+        this_address_cells = cells['buses'][0]['this-address-cells']
+        this_size_cells = cells['buses'][0]['this-size-cells']
+
+        regs = DtbMatchQuery.unpacker(cells['reg'], [this_address_cells, this_size_cells])
+        cells['reg'] = []
+
+        while True:
+            (addr, size) = next(regs, (None, None))
+            if addr == None:
+                break
+
+            addr = DtbMatchQuery.xlat_reg(addr, size, cells['buses'])
+
+            cells['reg'].extend(DtbMatchQuery.pack(addr, this_address_cells))
+            cells['reg'].extend(DtbMatchQuery.pack(size, this_size_cells))
+
+    @staticmethod
+    def resolve_translations(buses):
+        # find out necessary address range translations
+        bus_iter = iter(buses)
+        this_bus = next(bus_iter, None)
+
+        while this_bus:
+            parent_bus = next(bus_iter, None)
+            if 'ranges' in this_bus:
+                if not parent_bus:
+                    raise RuntimeError('cannot have \'ranges\' without parent bus')
+
+                # deserialize the 32-bit words from device tree
+                ranges = DtbMatchQuery.unpacker(this_bus['ranges'], [
+                    this_bus['this-address-cells'],
+                    parent_bus['this-address-cells'],
+                    this_bus['this-size-cells'],
+                ])
+
+                this_bus['translations'] = []
+                while True:
+                    (this_addr, parent_addr, this_size) = next(ranges, (None, None, None))
+                    if this_addr == None:
+                        break
+                    this_bus['translations'].append({
+                        'from_start': this_addr,
+                        'to_start': parent_addr,
+                        'size': this_size,
+                    })
+
+            this_bus = parent_bus
+
+        return buses
+
+    @staticmethod
+    def resolve_buses(node):
+        buses = []
+        parent = node.parent
+        while parent:
+            bus = {}
+
+            for p in parent.walk():
+                key = p[0][1:]
+                values = p[1]
+                if key == '#address-cells':
+                    bus['this-address-cells'] = list(values)[0]
+                elif key == '#size-cells':
+                    bus['this-size-cells'] = list(values)[0]
+                elif key == 'ranges':
+                    bus['ranges'] = list(values)
+
+            # if the parent does have the #address-cells and
+            # #size-cells property, default to 2 and 1 respectively
+            # as according to the Devicetree spec
+            if 'this-address-cells' not in bus:
+                bus['this-address-cells'] = 2
+            if 'this-size-cells' not in bus:
+                bus['this-size-cells'] = 1
+
+            buses.append(bus)
+            parent = parent.parent
+
+        return buses
+
+    @staticmethod
     def resolve_fdt_node(node):
         resolved = {}
 
@@ -429,22 +557,19 @@ class DtbMatchQuery(Query):
                 resolved[key] = []
             else:
                 resolved[key] = list(values)
-        # retrieve the #address-cells and #size-cells property
-        # from the parent
-        for p in node.parent.walk():
-            key = p[0][1:]
-            values = p[1]
-            if key == '#address-cells':
-                resolved['this-address-cells'] = list(values)
-            elif key == '#size-cells':
-                resolved['this-size-cells'] = list(values)
-        # if the parent does have the #address-cells and
-        # #size-cells property, default to 2 and 1 respectively
-        # as according to the Devicetree spec
-        if 'this-address-cells' not in resolved:
-            resolved['this-address-cells'] = [2]
-        if 'this-size-cells' not in resolved:
-            resolved['this-size-cells'] = [1]
+
+        # retrieve the #address-cells, #size-cells and ranges properties
+        # from the parents
+        buses = DtbMatchQuery.resolve_buses(node)
+        resolved['buses'] = DtbMatchQuery.resolve_translations(buses)
+
+        # compatibility with dtb-query-common.template.c
+        resolved['this-address-cells'] = [resolved['buses'][0]['this-address-cells']]
+        resolved['this-size-cells'] = [resolved['buses'][0]['this-size-cells']]
+
+        if 'reg' in resolved:
+            DtbMatchQuery.xlat_regs(resolved)
+
         # Resolve the full path of the fdt node by walking backwards
         # to the root of the device tree
         curr_node = node
