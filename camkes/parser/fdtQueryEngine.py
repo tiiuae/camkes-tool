@@ -417,6 +417,8 @@ class DtbMatchQuery(Query):
         # TODO: use 'this-ranges' property to map correctly
         if (resolved['reg'][0] == 0x7e215040):
             resolved['reg'][0] = 0xfe215040
+        elif (resolved['reg'][1] == 0x7d580000):
+            resolved['reg'][1] = 0xfd580000
 
     @staticmethod
     def resolve_fdt_node(node):
