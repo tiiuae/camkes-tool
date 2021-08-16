@@ -1,42 +1,47 @@
 /*
  * Copyright 2017, Data61, CSIRO (ABN 41 687 119 230)
+ * Copyright 2021, Unikie 
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 #pragma once
 
 #include <sel4/sel4.h>
+#include <machine/registerset.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <camkes/gdb/delegate_types.h>
 
-#define NO_BREAKPOINT -1
-#define USER_BREAKPOINT 0
-#define BREAKPOINT_INSTRUCTION 0xCC
-#define MAX_ARGS 20
-#define COMMAND_START                   1
+
+#define GDB_COMMAND_START_IDX           1
 #define HEX_STRING                      16
 #define DEC_STRING                      10
 #define CHAR_HEX_SIZE                   2
 
-// Colour coding for response packets from GDB stub
-//#define GDB_RESPONSE_START      "\x1b[31m"
-//#define GDB_RESPONSE_END        "\x1b[0m"
-#define GDB_RESPONSE_START      ""
-#define GDB_RESPONSE_END        ""
+// Colour coded response start/end
+//#define GDB_RESPONSE_START_STR      "\x1b[31m"
+//#define GDB_RESPONSE_END_STR        "\x1b[0m"
 
-// Ok packet for GDB
-#define GDB_ACK                 "+"
-#define GDB_NACK                "-"
+// Normal response start/end
+#define GDB_RESPONSE_START_STR        ""
+#define GDB_RESPONSE_END_STR          ""
+
+#define GDB_ACK_STR                   "+"
+#define GDB_NACK_STR                  "-"
+
+#if defined(CONFIG_ARCH_IA32)
+
 #define x86_VALID_REGISTERS     10
 #define x86_GDB_REGISTERS       13
 #define x86_MAX_REGISTERS       16
 #define x86_INVALID_REGISTER    10
-#define x86_NUM_HW_BRK          4
-#define x86_SW_BREAK            0xCC
 
-#define HARDWARE_BREAKPOINT      0x1
-#define GENERAL_PROTECTION_FAULT 0xD
+#endif
+// CONFIG_ARCH_AARCH32
+// CONFIG_ARCH_AARCH64
+// CONFIG_ARCH_X86_64
+// CONFIG_ARCH_RISCV
+
 
 typedef enum {
     stop_none,
