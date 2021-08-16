@@ -1,10 +1,12 @@
-/*#
- *# Copyright 2017, Data61, CSIRO (ABN 41 687 119 230)
- *#
- *# SPDX-License-Identifier: BSD-2-Clause
- #*/
+/*
+ * Copyright 2017, Data61, CSIRO (ABN 41 687 119 230)
+ * Copyright 2021, Unikie 
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
 #define ZF_LOG_LEVEL ZF_LOG_ERROR
-#include <endian.h>
+
 #include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
@@ -34,47 +36,300 @@ static void GDB_continue(char *command, gdb_state_t *gdb_state);
 static void GDB_step(char *command, gdb_state_t *gdb_state);
 static void GDB_breakpoint(char *command, bool insert, gdb_state_t *gdb_state);
 
-// The ordering of registers as GDB expects them
-typedef enum {
-    GDBRegister_eax =    0,
-    GDBRegister_ecx =    1,
-    GDBRegister_edx =    2,
-    GDBRegister_ebx =    3,
-    GDBRegister_esp =    4,
-    GDBRegister_ebp =    5,
-    GDBRegister_esi =    6,
-    GDBRegister_edi =    7,
-    GDBRegister_eip =    8,
-    GDBRegister_eflags = 9,
-    GDBRegister_cs =     10,
-    GDBRegister_ss =     11,
-    GDBRegister_ds =     12,
-    GDBRegister_es =     13,
-    GDBRegister_fs_base = 14,
-    GDBRegister_gs_base = 15
-} x86_gdb_registers;
+
+#define SEL4_REGISTER_IDX(reg)    ((size_t)OFFSETOF(seL4_UserContext, reg))
+#define INVALID_SEL4_REGISTER_IDX ((size_t)-1)
 
 
-#define DECLARE_GDB_TO_SEL4(NAME) [GDBRegister_##NAME] = OFFSETOF(seL4_UserContext, NAME)
+// For the GDB register definitions in GDB sources,
+// see 
+// "/gdb/features/"
+// "/gdb/features/arm/"
+//
+// For the seL4 register definitions in seL4 sources,
+// see 
+// "/seL4/libsel4/sel4_arch_include/$ARCH/sel4/sel4_arch/types.h"
+// "/seL4/include/arch/$ARCH/arch/32/mode/machine/registerset.h"
+// "/seL4/include/arch/$ARCH/arch/64/mode/machine/registerset.h"
 
-static size_t gdb_to_seL4_register_index[] = {
-    DECLARE_GDB_TO_SEL4(eax),
-    DECLARE_GDB_TO_SEL4(ecx),
-    DECLARE_GDB_TO_SEL4(edx),
-    DECLARE_GDB_TO_SEL4(ebx),
-    DECLARE_GDB_TO_SEL4(esp),
-    DECLARE_GDB_TO_SEL4(ebp),
-    DECLARE_GDB_TO_SEL4(esi),
-    DECLARE_GDB_TO_SEL4(edi),
-    DECLARE_GDB_TO_SEL4(eip),
-    DECLARE_GDB_TO_SEL4(eflags),
-    DECLARE_GDB_TO_SEL4(fs_base),
-    DECLARE_GDB_TO_SEL4(gs_base),
-    [GDBRegister_cs] = -1,
-    [GDBRegister_ss] = -1,
-    [GDBRegister_ds] = -1,
-    [GDBRegister_es] = -1,
+#if defined(CONFIG_ARCH_IA32)
+
+// GDB expected order of registers
+typedef enum _x86_gdb_registers
+{
+    X86_GDB_REGISTER_eax     = 0,
+    X86_GDB_REGISTER_ecx     = 1,
+    X86_GDB_REGISTER_edx     = 2,
+    X86_GDB_REGISTER_ebx     = 3,
+    X86_GDB_REGISTER_esp     = 4,
+    X86_GDB_REGISTER_ebp     = 5,
+    X86_GDB_REGISTER_esi     = 6,
+    X86_GDB_REGISTER_edi     = 7,
+    X86_GDB_REGISTER_eip     = 8,
+    X86_GDB_REGISTER_eflags  = 9,
+    X86_GDB_REGISTER_cs      = 10,
+    X86_GDB_REGISTER_ss      = 11,
+    X86_GDB_REGISTER_ds      = 12,
+    X86_GDB_REGISTER_es      = 13,
+    X86_GDB_REGISTER_fs      = 14,
+    X86_GDB_REGISTER_gs      = 15,
+    
+    X86_NUM_GDB_REGISTERS
+} gdb_register_t;
+
+#define NUM_GDB_REGISTERS (X86_NUM_GDB_REGISTERS)
+    
+static const size_t gdb_to_seL4_register_index[NUM_GDB_REGISTERS] = 
+{
+    [X86_GDB_REGISTER_eax]     = SEL4_REGISTER_IDX(eax),
+    [X86_GDB_REGISTER_ecx]     = SEL4_REGISTER_IDX(ecx),
+    [X86_GDB_REGISTER_edx]     = SEL4_REGISTER_IDX(edx),
+    [X86_GDB_REGISTER_ebx]     = SEL4_REGISTER_IDX(ebx),
+    [X86_GDB_REGISTER_esp]     = SEL4_REGISTER_IDX(esp),
+    [X86_GDB_REGISTER_ebp]     = SEL4_REGISTER_IDX(ebp),
+    [X86_GDB_REGISTER_esi]     = SEL4_REGISTER_IDX(esi),
+    [X86_GDB_REGISTER_edi]     = SEL4_REGISTER_IDX(edi),
+    [X86_GDB_REGISTER_eip]     = SEL4_REGISTER_IDX(eip),
+    [X86_GDB_REGISTER_eflags]  = SEL4_REGISTER_IDX(eflags),
+    [X86_GDB_REGISTER_cs]      = INVALID_SEL4_REGISTER_IDX, // Does not exist in seL4
+    [X86_GDB_REGISTER_ss]      = INVALID_SEL4_REGISTER_IDX, // Does not exist in seL4
+    [X86_GDB_REGISTER_ds]      = INVALID_SEL4_REGISTER_IDX, // Does not exist in seL4
+    [X86_GDB_REGISTER_es]      = INVALID_SEL4_REGISTER_IDX, // Does not exist in seL4
+    [X86_GDB_REGISTER_fs]      = SEL4_REGISTER_IDX(fs_base),
+    [X86_GDB_REGISTER_gs]      = SEL4_REGISTER_IDX(gs_base)
 };
+
+#elif defined(CONFIG_ARCH_X86_64)
+
+// GDB expected order of registers
+typedef enum _x86_64_gdb_registers
+{
+    X86_64_GDB_REGISTER_rax     = 0,
+    X86_64_GDB_REGISTER_rbx     = 1,
+    X86_64_GDB_REGISTER_rcx     = 2,
+    X86_64_GDB_REGISTER_rdx     = 3,
+    X86_64_GDB_REGISTER_rsi     = 4,
+    X86_64_GDB_REGISTER_rdi     = 5,
+    X86_64_GDB_REGISTER_rbp     = 6,
+    X86_64_GDB_REGISTER_rsp     = 7,
+    X86_64_GDB_REGISTER_r8      = 8,
+    X86_64_GDB_REGISTER_r9      = 9,
+    X86_64_GDB_REGISTER_r10     = 10,
+    X86_64_GDB_REGISTER_r11     = 11,
+    X86_64_GDB_REGISTER_r12     = 12,
+    X86_64_GDB_REGISTER_r13     = 13,
+    X86_64_GDB_REGISTER_r14     = 14,
+    X86_64_GDB_REGISTER_r15     = 15,
+    X86_64_GDB_REGISTER_rip     = 16,
+    X86_64_GDB_REGISTER_eflags  = 17,
+    X86_64_GDB_REGISTER_cs      = 18,
+    X86_64_GDB_REGISTER_ss      = 19,
+    X86_64_GDB_REGISTER_ds      = 20,
+    X86_64_GDB_REGISTER_es      = 21,
+    X86_64_GDB_REGISTER_fs      = 22,
+    X86_64_GDB_REGISTER_gs      = 23,
+
+    X86_64_NUM_GDB_REGISTERS
+} gdb_register_t;
+
+#define NUM_GDB_REGISTERS (X86_64_NUM_GDB_REGISTERS)
+    
+static const size_t gdb_to_seL4_register_index[NUM_GDB_REGISTERS] = 
+{
+    [X86_64_GDB_REGISTER_rax]     = SEL4_REGISTER_IDX(rax),
+    [X86_64_GDB_REGISTER_rbx]     = SEL4_REGISTER_IDX(rbx),
+    [X86_64_GDB_REGISTER_rcx]     = SEL4_REGISTER_IDX(rcx),
+    [X86_64_GDB_REGISTER_rdx]     = SEL4_REGISTER_IDX(rdx),
+    [X86_64_GDB_REGISTER_rsi]     = SEL4_REGISTER_IDX(rsi),
+    [X86_64_GDB_REGISTER_rdi]     = SEL4_REGISTER_IDX(rdi),
+    [X86_64_GDB_REGISTER_rbp]     = SEL4_REGISTER_IDX(rbp),
+    [X86_64_GDB_REGISTER_rsp]     = SEL4_REGISTER_IDX(rsp),
+    [X86_64_GDB_REGISTER_r8]      = SEL4_REGISTER_IDX(r8),
+    [X86_64_GDB_REGISTER_r9]      = SEL4_REGISTER_IDX(r9),
+    [X86_64_GDB_REGISTER_r10]     = SEL4_REGISTER_IDX(r10),
+    [X86_64_GDB_REGISTER_r11]     = SEL4_REGISTER_IDX(r11),
+    [X86_64_GDB_REGISTER_r12]     = SEL4_REGISTER_IDX(r12),
+    [X86_64_GDB_REGISTER_r13]     = SEL4_REGISTER_IDX(r13),
+    [X86_64_GDB_REGISTER_r14]     = SEL4_REGISTER_IDX(r14),
+    [X86_64_GDB_REGISTER_r15]     = SEL4_REGISTER_IDX(r15),
+    [X86_64_GDB_REGISTER_rip]     = SEL4_REGISTER_IDX(rip),
+    [X86_64_GDB_REGISTER_eflags]  = SEL4_REGISTER_IDX(eflags),
+    [X86_64_GDB_REGISTER_cs]      = INVALID_SEL4_REGISTER_IDX, // Does not exist in seL4
+    [X86_64_GDB_REGISTER_ss]      = INVALID_SEL4_REGISTER_IDX, // Does not exist in seL4
+    [X86_64_GDB_REGISTER_ds]      = INVALID_SEL4_REGISTER_IDX, // Does not exist in seL4
+    [X86_64_GDB_REGISTER_es]      = INVALID_SEL4_REGISTER_IDX, // Does not exist in seL4
+    [X86_64_GDB_REGISTER_fs]      = SEL4_REGISTER_IDX(fs_base),
+    [X86_64_GDB_REGISTER_gs]      = SEL4_REGISTER_IDX(gs_base)
+};
+
+#elif defined(CONFIG_ARCH_AARCH32)
+
+// GDB expected order of registers
+typedef enum _aarch32_gdb_registers
+{
+    AARCH32_GDB_REGISTER_r0    = 0,
+    AARCH32_GDB_REGISTER_r1    = 1,
+    AARCH32_GDB_REGISTER_r2    = 2,
+    AARCH32_GDB_REGISTER_r3    = 3,
+    AARCH32_GDB_REGISTER_r4    = 4,
+    AARCH32_GDB_REGISTER_r5    = 5,
+    AARCH32_GDB_REGISTER_r6    = 6,
+    AARCH32_GDB_REGISTER_r7    = 7,
+    AARCH32_GDB_REGISTER_r8    = 8,
+    AARCH32_GDB_REGISTER_r9    = 9,
+    AARCH32_GDB_REGISTER_r10   = 10,
+    AARCH32_GDB_REGISTER_r11   = 11,
+    AARCH32_GDB_REGISTER_r12   = 12,
+    AARCH32_GDB_REGISTER_sp    = 13,
+    AARCH32_GDB_REGISTER_lr    = 14, // LR == R14 in seL4
+    AARCH32_GDB_REGISTER_pc    = 15,
+    
+    // From GDB arm-core.xml:
+    //
+    // "The CPSR is register 25, rather than register 16, because
+    // the FPA registers historically were placed between the PC
+    // and the CPSR in the "g" packet."
+    
+    AARCH32_GDB_REGISTER_cpsr  = 25,
+    
+    AARCH32_NUM_GDB_REGISTERS
+} gdb_register_t;
+
+#define NUM_GDB_REGISTERS (AARCH32_NUM_GDB_REGISTERS)
+    
+static const size_t gdb_to_seL4_register_index[NUM_GDB_REGISTERS] = 
+{
+    [AARCH32_GDB_REGISTER_r0]     = SEL4_REGISTER_IDX(r0),
+    [AARCH32_GDB_REGISTER_r1]     = SEL4_REGISTER_IDX(r1),
+    [AARCH32_GDB_REGISTER_r2]     = SEL4_REGISTER_IDX(r2),
+    [AARCH32_GDB_REGISTER_r3]     = SEL4_REGISTER_IDX(r3),
+    [AARCH32_GDB_REGISTER_r4]     = SEL4_REGISTER_IDX(r4),
+    [AARCH32_GDB_REGISTER_r5]     = SEL4_REGISTER_IDX(r5),
+    [AARCH32_GDB_REGISTER_r6]     = SEL4_REGISTER_IDX(r6),
+    [AARCH32_GDB_REGISTER_r7]     = SEL4_REGISTER_IDX(r7),
+    [AARCH32_GDB_REGISTER_r8]     = SEL4_REGISTER_IDX(r8),
+    [AARCH32_GDB_REGISTER_r9]     = SEL4_REGISTER_IDX(r9),
+    [AARCH32_GDB_REGISTER_r10]    = SEL4_REGISTER_IDX(r10),
+    [AARCH32_GDB_REGISTER_r11]    = SEL4_REGISTER_IDX(r11),
+    [AARCH32_GDB_REGISTER_r12]    = SEL4_REGISTER_IDX(r12),
+    [AARCH32_GDB_REGISTER_sp]     = SEL4_REGISTER_IDX(sp),
+    [AARCH32_GDB_REGISTER_lr]     = SEL4_REGISTER_IDX(r14), // LR == R14 in seL4
+    [AARCH32_GDB_REGISTER_pc]     = SEL4_REGISTER_IDX(pc),
+    [16]                          = INVALID_SEL4_REGISTER_IDX, // Does not exist
+    [17]                          = INVALID_SEL4_REGISTER_IDX, // Does not exist
+    [18]                          = INVALID_SEL4_REGISTER_IDX, // Does not exist
+    [19]                          = INVALID_SEL4_REGISTER_IDX, // Does not exist
+    [20]                          = INVALID_SEL4_REGISTER_IDX, // Does not exist
+    [21]                          = INVALID_SEL4_REGISTER_IDX, // Does not exist
+    [22]                          = INVALID_SEL4_REGISTER_IDX, // Does not exist
+    [23]                          = INVALID_SEL4_REGISTER_IDX, // Does not exist
+    [24]                          = INVALID_SEL4_REGISTER_IDX, // Does not exist
+    [AARCH32_GDB_REGISTER_cpsr]   = SEL4_REGISTER_IDX(cpsr)
+};
+
+#elif defined(CONFIG_ARCH_AARCH64)
+
+// GDB expected order of registers
+typedef enum _aarch64_gdb_registers
+{
+    AARCH64_GDB_REGISTER_x0    = 0,
+    AARCH64_GDB_REGISTER_x1    = 1,
+    AARCH64_GDB_REGISTER_x2    = 2,
+    AARCH64_GDB_REGISTER_x3    = 3,
+    AARCH64_GDB_REGISTER_x4    = 4,
+    AARCH64_GDB_REGISTER_x5    = 5,
+    AARCH64_GDB_REGISTER_x6    = 6,
+    AARCH64_GDB_REGISTER_x7    = 7,
+    AARCH64_GDB_REGISTER_x8    = 8,
+    AARCH64_GDB_REGISTER_x9    = 9,
+    AARCH64_GDB_REGISTER_x10   = 10,
+    AARCH64_GDB_REGISTER_x11   = 11,
+    AARCH64_GDB_REGISTER_x12   = 12,
+    AARCH64_GDB_REGISTER_x13   = 13,
+    AARCH64_GDB_REGISTER_x14   = 14,
+    AARCH64_GDB_REGISTER_x15   = 15,
+    AARCH64_GDB_REGISTER_x16   = 16,
+    AARCH64_GDB_REGISTER_x17   = 17,
+    AARCH64_GDB_REGISTER_x18   = 18,
+    AARCH64_GDB_REGISTER_x19   = 19,
+    AARCH64_GDB_REGISTER_x20   = 20,
+    AARCH64_GDB_REGISTER_x21   = 21,
+    AARCH64_GDB_REGISTER_x22   = 22,
+    AARCH64_GDB_REGISTER_x23   = 23,
+    AARCH64_GDB_REGISTER_x24   = 24,
+    AARCH64_GDB_REGISTER_x25   = 25,
+    AARCH64_GDB_REGISTER_x26   = 26,
+    AARCH64_GDB_REGISTER_x27   = 27,
+    AARCH64_GDB_REGISTER_x28   = 28,
+    AARCH64_GDB_REGISTER_x29   = 29,
+    AARCH64_GDB_REGISTER_x30   = 30, // x30 or LR in seL4
+    AARCH64_GDB_REGISTER_sp    = 31,
+    AARCH64_GDB_REGISTER_pc    = 32,
+    AARCH64_GDB_REGISTER_cpsr  = 33,
+    
+    AARCH64_NUM_GDB_REGISTERS
+} gdb_register_t;
+
+#define NUM_GDB_REGISTERS (AARCH64_NUM_GDB_REGISTERS)
+    
+static const size_t gdb_to_seL4_register_index[NUM_GDB_REGISTERS] = 
+{
+    [AARCH64_GDB_REGISTER_x0]    = SEL4_REGISTER_IDX(x0),
+    [AARCH64_GDB_REGISTER_x1]    = SEL4_REGISTER_IDX(x1),   
+    [AARCH64_GDB_REGISTER_x2]    = SEL4_REGISTER_IDX(x2),   
+    [AARCH64_GDB_REGISTER_x3]    = SEL4_REGISTER_IDX(x3),   
+    [AARCH64_GDB_REGISTER_x4]    = SEL4_REGISTER_IDX(x4),   
+    [AARCH64_GDB_REGISTER_x5]    = SEL4_REGISTER_IDX(x5),   
+    [AARCH64_GDB_REGISTER_x6]    = SEL4_REGISTER_IDX(x6),   
+    [AARCH64_GDB_REGISTER_x7]    = SEL4_REGISTER_IDX(x7),   
+    [AARCH64_GDB_REGISTER_x8]    = SEL4_REGISTER_IDX(x8),   
+    [AARCH64_GDB_REGISTER_x9]    = SEL4_REGISTER_IDX(x9),   
+    [AARCH64_GDB_REGISTER_x10]   = SEL4_REGISTER_IDX(x10),    
+    [AARCH64_GDB_REGISTER_x11]   = SEL4_REGISTER_IDX(x11),    
+    [AARCH64_GDB_REGISTER_x12]   = SEL4_REGISTER_IDX(x12),    
+    [AARCH64_GDB_REGISTER_x13]   = SEL4_REGISTER_IDX(x13),    
+    [AARCH64_GDB_REGISTER_x14]   = SEL4_REGISTER_IDX(x14),    
+    [AARCH64_GDB_REGISTER_x15]   = SEL4_REGISTER_IDX(x15),    
+    [AARCH64_GDB_REGISTER_x16]   = SEL4_REGISTER_IDX(x16),    
+    [AARCH64_GDB_REGISTER_x17]   = SEL4_REGISTER_IDX(x17),    
+    [AARCH64_GDB_REGISTER_x18]   = SEL4_REGISTER_IDX(x18),    
+    [AARCH64_GDB_REGISTER_x19]   = SEL4_REGISTER_IDX(x19),    
+    [AARCH64_GDB_REGISTER_x20]   = SEL4_REGISTER_IDX(x20),    
+    [AARCH64_GDB_REGISTER_x21]   = SEL4_REGISTER_IDX(x21),    
+    [AARCH64_GDB_REGISTER_x22]   = SEL4_REGISTER_IDX(x22),    
+    [AARCH64_GDB_REGISTER_x23]   = SEL4_REGISTER_IDX(x23),    
+    [AARCH64_GDB_REGISTER_x24]   = SEL4_REGISTER_IDX(x24),    
+    [AARCH64_GDB_REGISTER_x25]   = SEL4_REGISTER_IDX(x25),    
+    [AARCH64_GDB_REGISTER_x26]   = SEL4_REGISTER_IDX(x26),    
+    [AARCH64_GDB_REGISTER_x27]   = SEL4_REGISTER_IDX(x27),    
+    [AARCH64_GDB_REGISTER_x28]   = SEL4_REGISTER_IDX(x28),    
+    [AARCH64_GDB_REGISTER_x29]   = SEL4_REGISTER_IDX(x29),    
+    [AARCH64_GDB_REGISTER_x30]   = SEL4_REGISTER_IDX(x30), // x30 or LR in seL4
+    [AARCH64_GDB_REGISTER_sp]    = SEL4_REGISTER_IDX(sp),    
+    [AARCH64_GDB_REGISTER_pc]    = SEL4_REGISTER_IDX(pc),    
+    [AARCH64_GDB_REGISTER_cpsr]  = SEL4_REGISTER_IDX(cpsr)    
+};
+
+#elif defined(CONFIG_ARCH_RISCV)
+#error "RISCV not supported yet!"
+#else
+#error "Unknown architecture specified!"
+#endif
+
+
+/** Parse GDB register index to corresponding `seL4_UserContext` register structure index.
+ *
+ * @param gdb_register GDB register index.
+ * @return `seL4_UserContext` register index or `INVALID_SEL4_REGISTER_IDX` if the corresponding register does not exist in `seL4_UserContext` structure.
+ */
+static inline size_t gdb_register_idx_to_seL4_UserContext_idx(gdb_register_t gdb_reg)
+{
+    size_t uc_idx = (size_t)INVALID_SEL4_REGISTER_IDX;
+    
+    if (gdb_reg < NUM_GDB_REGISTERS) {
+        uc_idx = gdb_to_seL4_register_index[gdb_reg];
+    }
+}
 
 static inline size_t x86_GDB_Register_to_seL4_UserContext(x86_gdb_registers gdb_register)
 {
@@ -179,7 +434,7 @@ int handle_gdb(gdb_state_t *gdb_state)
 {
     // Get command and checksum
     int command_length = buf.checksum_index - 1;
-    char *command_ptr = &buf.data[COMMAND_START];
+    char *command_ptr = &buf.data[GDB_COMMAND_START_IDX];
     char command[GETCHAR_BUFSIZ + 1] = {0};
     strncpy(command, command_ptr, command_length);
     char *checksum = &buf.data[buf.checksum_index + 1];
@@ -195,10 +450,10 @@ int handle_gdb(gdb_state_t *gdb_state)
                 "received %x received_checksum\n",
                 computed_checksum, received_checksum);
         // Acknowledge packet
-        gdb_printf(GDB_RESPONSE_START GDB_NACK GDB_RESPONSE_END "\n");
+        gdb_printf(GDB_RESPONSE_START_STR GDB_NACK_STR GDB_RESPONSE_END_STR "\n");
     } else {
         // Acknowledge packet
-        gdb_printf(GDB_RESPONSE_START GDB_ACK GDB_RESPONSE_END "\n");
+        gdb_printf(GDB_RESPONSE_START_STR GDB_ACK_STR GDB_RESPONSE_END_STR "\n");
         // Parse the command
         handle_command(command, gdb_state);
     }
@@ -221,8 +476,8 @@ static void send_message(char *message, int len)
     }
     ZF_LOGD("message: %s", message);
     unsigned char checksum = compute_checksum(message, len);
-    gdb_printf(GDB_RESPONSE_START "$%s#%02X\n", message, checksum);
-    gdb_printf(GDB_RESPONSE_END);
+    gdb_printf(GDB_RESPONSE_START_STR "$%s#%02X\n", message, checksum);
+    gdb_printf(GDB_RESPONSE_END_STR);
 }
 
 
@@ -436,13 +691,13 @@ static void GDB_read_register(char *command, gdb_state_t *gdb_state)
     seL4_Word reg;
     char *token_ptr;
     // Get which register we want to read
-    char *reg_string = strtok_r(&command[1], "", &token_ptr);
+    char *reg_string = strtok_r(&command[GDB_COMMAND_START_IDX], "", &token_ptr);
     if (reg_string == NULL) {
         send_message("E00", 0);
         return;
     }
     seL4_Word reg_num = strtol(reg_string, NULL, HEX_STRING);
-    if (reg_num >= x86_INVALID_REGISTER) {
+    if (reg_num >= x86_VALID_REGISTERS) {
         send_message("E00", 0);
         return;
     }
@@ -468,7 +723,7 @@ static void GDB_write_general_registers(char *command, gdb_state_t *gdb_state)
 {
     char *token_ptr;
     // Get args from command
-    char *data_string = strtok_r(&command[1], "", &token_ptr);
+    char *data_string = strtok_r(&command[GDB_COMMAND_START_IDX], "", &token_ptr);
     // Truncate data to register length
     int num_regs = sizeof(seL4_UserContext) / sizeof(seL4_Word);
     int num_regs_data = (strlen(data_string)) / (sizeof(seL4_Word) * 2);
@@ -493,7 +748,7 @@ static void GDB_write_register(char *command, gdb_state_t *gdb_state)
 {
     char *token_ptr;
     // Parse arguments
-    char *reg_string = strtok_r(&command[1], "=", &token_ptr);
+    char *reg_string = strtok_r(&command[GDB_COMMAND_START_IDX], "=", &token_ptr);
     char *data_string = strtok_r(NULL, "", &token_ptr);
     // If valid register, do something, otherwise reply OK
     seL4_Word reg_num = strtol(reg_string, NULL, HEX_STRING);
@@ -571,7 +826,7 @@ static void GDB_breakpoint(char *command, bool insert, gdb_state_t *gdb_state)
     seL4_Word break_type;
     seL4_Word rw;
     // Parse arguments
-    char *type_string = strtok_r(&command[1], ",", &token_ptr);
+    char *type_string = strtok_r(&command[GDB_COMMAND_START_IDX], ",", &token_ptr);
     char *addr_string = strtok_r(NULL, ",", &token_ptr);
     char *size_string = strtok_r(NULL, ",", &token_ptr);
     // Convert strings to values
@@ -724,13 +979,13 @@ static int handle_command(char *command, gdb_state_t *gdb_state)
         ZF_LOGE("Not implemented: check thread");
         break;
     case 'v':
-        if (!strncmp(&command[1], "Cont?", 5)) {
+        if (!strncmp(&command[GDB_COMMAND_START_IDX], "Cont?", 5)) {
             send_message("vCont;c;s", 0);
-        } else if (!strncmp(&command[1], "Cont", 4)) {
+        } else if (!strncmp(&command[GDB_COMMAND_START_IDX], "Cont", 4)) {
             GDB_vcont(command, gdb_state);
-        } else if (!strncmp(&command[1], "Kill", 4)) {
+        } else if (!strncmp(&command[GDB_COMMAND_START_IDX], "Kill", 4)) {
             send_message("", 0);
-        } else if (!strncmp(&command[1], "MustReplyEmpty", 14)) {
+        } else if (!strncmp(&command[GDB_COMMAND_START_IDX], "MustReplyEmpty", 14)) {
             send_message("", 0);
         } else {
             ZF_LOGE("Command not supported");
