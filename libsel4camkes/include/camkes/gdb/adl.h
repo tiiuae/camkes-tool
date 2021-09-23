@@ -11,7 +11,7 @@ assembly {  \
     component debug_serial debug_hw_serial; \
     connection seL4HardwareIOPort debug_port (from debug.serial_port, to debug_hw_serial.serial); \
     connection seL4HardwareInterrupt interrupt1 (from debug_hw_serial.serial_irq, to debug.serial_irq); \
-    connection seL4RPC delegate_con (from debug.delegate, to TARGET.delegate); \
+    connection seL4RPCCall delegate_con (from debug.delegate, to TARGET.delegate); \
     connection seL4GDB debug0 (from TARGET.fault, to debug.client_fault); \
     connection seL4GDBMem debug0_mem (from TARGET.GDB_mem, to TARGET.GDB_mem_handler); \
     } \

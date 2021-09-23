@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sel4/sel4.h>
+#include <sel4/types.h>
 #include <sel4debug/debug.h>
 #include <utils/util.h>
 #include <camkes.h>
