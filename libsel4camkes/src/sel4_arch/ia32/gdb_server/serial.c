@@ -367,7 +367,7 @@ void serial_irq_handle(void)
     error = serial_irq_acknowledge();
     error = serial_unlock();
     if (got_command) {
-        handle_gdb(gdb_state);
+        gdb_handle(gdb_state);
         error = serial_lock();
         clear_buffer();
         command_wait = false;

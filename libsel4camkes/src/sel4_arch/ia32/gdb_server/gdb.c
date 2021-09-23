@@ -19,8 +19,28 @@
 gdb_buffer_t buf;
 
 
-static void send_message(char *message, int len);
-static int handle_command(char *command, gdb_state_t *gdb_state);
+static void GDB_send_message(char *message, size_t len);
+static int GDB_handle_command(char *command, gdb_state_t *gdb_state);
+
+static inline void GDB_reply_e00(void)
+{
+    GDB_send_message("E00", 0);
+}
+
+static inline void GDB_reply_e01(void)
+{
+    GDB_send_message("E01", 0);
+}
+
+static inline void GDB_reply_ok(void)
+{
+    GDB_send_message("OK", 0);
+}
+
+static inline void GDB_reply_empty(void)
+{
+    GDB_send_message("", 0);
+}
 
 static void GDB_write_register(char *command, gdb_state_t *gdb_state);
 static void GDB_read_memory(char *command);
@@ -39,6 +59,10 @@ static void GDB_breakpoint(char *command, bool insert, gdb_state_t *gdb_state);
 
 #define SEL4_REGISTER_IDX(reg)    ((size_t)OFFSETOF(seL4_UserContext, reg))
 #define INVALID_SEL4_REGISTER_IDX ((size_t)-1)
+#define NUM_SEL4_REGISTERS        (sizeof(seL4_UserContext) / sizeof(seL4_Word))
+
+#define SEL4_REGISTER_WIDTH_CHARS (sizeof(seL4_Word) * CHAR_HEX_SIZE) // How many ASCII chars it takes to display the whole value
+#define SEL4_REGISTER_WIDTH_BYTES (sizeof(seL4_Word))
 
 
 // For the GDB register definitions in GDB sources,
@@ -74,7 +98,8 @@ typedef enum _x86_gdb_registers
     X86_GDB_REGISTER_fs      = 14,
     X86_GDB_REGISTER_gs      = 15,
     
-    X86_NUM_GDB_REGISTERS
+    X86_NUM_GDB_REGISTERS,
+    PROGRAM_COUNTER_REG      = X86_GDB_REGISTER_eip
 } gdb_register_t;
 
 #define NUM_GDB_REGISTERS (X86_NUM_GDB_REGISTERS)
@@ -98,6 +123,8 @@ static const size_t gdb_to_seL4_register_index[NUM_GDB_REGISTERS] =
     [X86_GDB_REGISTER_fs]      = SEL4_REGISTER_IDX(fs_base),
     [X86_GDB_REGISTER_gs]      = SEL4_REGISTER_IDX(gs_base)
 };
+
+#define SEL4_REGISTER_UNKNOWN_VALUE "xxxxxxxx"
 
 #elif defined(CONFIG_ARCH_X86_64)
 
@@ -129,7 +156,8 @@ typedef enum _x86_64_gdb_registers
     X86_64_GDB_REGISTER_fs      = 22,
     X86_64_GDB_REGISTER_gs      = 23,
 
-    X86_64_NUM_GDB_REGISTERS
+    X86_64_NUM_GDB_REGISTERS,
+    PROGRAM_COUNTER_REG         = X86_64_GDB_REGISTER_rip
 } gdb_register_t;
 
 #define NUM_GDB_REGISTERS (X86_64_NUM_GDB_REGISTERS)
@@ -162,6 +190,8 @@ static const size_t gdb_to_seL4_register_index[NUM_GDB_REGISTERS] =
     [X86_64_GDB_REGISTER_gs]      = SEL4_REGISTER_IDX(gs_base)
 };
 
+#define SEL4_REGISTER_UNKNOWN_VALUE "xxxxxxxxxxxxxxxx"
+
 #elif defined(CONFIG_ARCH_AARCH32)
 
 // GDB expected order of registers
@@ -192,7 +222,8 @@ typedef enum _aarch32_gdb_registers
     
     AARCH32_GDB_REGISTER_cpsr  = 25,
     
-    AARCH32_NUM_GDB_REGISTERS
+    AARCH32_NUM_GDB_REGISTERS,
+    PROGRAM_COUNTER_REG        = AARCH32_GDB_REGISTER_pc
 } gdb_register_t;
 
 #define NUM_GDB_REGISTERS (AARCH32_NUM_GDB_REGISTERS)
@@ -226,6 +257,8 @@ static const size_t gdb_to_seL4_register_index[NUM_GDB_REGISTERS] =
     [24]                          = INVALID_SEL4_REGISTER_IDX, // Does not exist
     [AARCH32_GDB_REGISTER_cpsr]   = SEL4_REGISTER_IDX(cpsr)
 };
+
+#define SEL4_REGISTER_UNKNOWN_VALUE "xxxxxxxx"
 
 #elif defined(CONFIG_ARCH_AARCH64)
 
@@ -267,7 +300,8 @@ typedef enum _aarch64_gdb_registers
     AARCH64_GDB_REGISTER_pc    = 32,
     AARCH64_GDB_REGISTER_cpsr  = 33,
     
-    AARCH64_NUM_GDB_REGISTERS
+    AARCH64_NUM_GDB_REGISTERS,
+    PROGRAM_COUNTER_REG        = AARCH64_GDB_REGISTER_pc
 } gdb_register_t;
 
 #define NUM_GDB_REGISTERS (AARCH64_NUM_GDB_REGISTERS)
@@ -310,6 +344,8 @@ static const size_t gdb_to_seL4_register_index[NUM_GDB_REGISTERS] =
     [AARCH64_GDB_REGISTER_cpsr]  = SEL4_REGISTER_IDX(cpsr)    
 };
 
+#define SEL4_REGISTER_UNKNOWN_VALUE "xxxxxxxxxxxxxxxx"
+
 #elif defined(CONFIG_ARCH_RISCV)
 #error "RISCV not supported yet!"
 #else
@@ -322,29 +358,62 @@ static const size_t gdb_to_seL4_register_index[NUM_GDB_REGISTERS] =
  * @param gdb_register GDB register index.
  * @return `seL4_UserContext` register index or `INVALID_SEL4_REGISTER_IDX` if the corresponding register does not exist in `seL4_UserContext` structure.
  */
-static inline size_t gdb_register_idx_to_seL4_UserContext_idx(gdb_register_t gdb_reg)
+static inline size_t gdb_register_idx_to_sel4_usercontext_idx(gdb_register_t gdb_reg)
 {
     size_t uc_idx = (size_t)INVALID_SEL4_REGISTER_IDX;
     
     if (gdb_reg < NUM_GDB_REGISTERS) {
         uc_idx = gdb_to_seL4_register_index[gdb_reg];
     }
+    
+    return uc_idx;
 }
 
-static inline size_t x86_GDB_Register_to_seL4_UserContext(x86_gdb_registers gdb_register)
+static inline int get_sel4_register_value(seL4_UserContext *regs, const seL4_Word *value, const size_t index)
 {
-
-    size_t index = -1;
-    if (gdb_register < x86_MAX_REGISTERS) {
-        index = gdb_to_seL4_register_index[gdb_register];
+    if (INVALID_SEL4_REGISTER_IDX == index) {
+        return 0;
+    } else {
+        const size_t reg_word_offset = index / SEL4_REGISTER_WIDTH_BYTES;
+        *value = (seL4_Word*)(regs[reg_word_offset]);
+        return 1;
     }
-    if (index != -1) {
-        /* Turn byte offset into index */
-        index /= sizeof(seL4_Word);
-    }
-    return index;
 }
 
+static inline int set_sel4_register_value(seL4_UserContext *regs, const seL4_Word value, const size_t index)
+{
+    if (INVALID_SEL4_REGISTER_IDX == index) {
+        return 0;
+    } else {
+        const size_t reg_word_offset = index / SEL4_REGISTER_WIDTH_BYTES;
+        ((seL4_Word*)regs[reg_word_offset]) = value;
+        return 1;
+    }
+}
+
+static inline seL4_Word handle_endian_swap(seL4_Word value)
+{
+#if defined(CONFIG_ARCH_IA32)|| defined(CONFIG_ARCH_X86_64)
+    // Set correct byte order
+    return BSWAP_WORD(value);
+#else
+    return value;
+#endif
+}
+
+static inline void gdb_state_update_pc(gdb_state_t *gdb_state, seL4_UserContext *regs)
+{
+#if defined(CONFIG_ARCH_IA32)
+    gdb_state->current_pc = regs.eip;
+#elif defined(CONFIG_ARCH_X86_64)
+    gdb_state->current_pc = regs.rip;
+#elif defined(CONFIG_ARCH_AARCH32) || defined(CONFIG_ARCH_AARCH64)
+    gdb_state->current_pc = regs.pc;
+#else
+    (void)gdb_state;
+    (void)regs;
+#endif
+}
 
 // Compute a checksum for the GDB remote protocol
 static unsigned char compute_checksum(char *data, int length)
@@ -356,38 +425,44 @@ static unsigned char compute_checksum(char *data, int length)
     return checksum;
 }
 
-static void string_to_word_data(char *string, seL4_Word *dest)
+static inline seL4_Word parse_word_from_str(const char *source_str, const int base)
 {
-    char buf[sizeof(seL4_Word) * 2] = {0};
-    strncpy(buf, string, sizeof(seL4_Word) * 2);
-    *dest = (seL4_Word) strtoul((char *) buf, NULL, HEX_STRING);
+    const size_t bufsz = SEL4_REGISTER_WIDTH_CHARS + 1;
+    char tempbuf[bufsz] = {0};
+    
+    strncpy(tempbuf, source_str, bufsz);
+    seL4_Word value = (seL4_Word) strtoul((const char*)tempbuf, NULL, base);
+    
+    return value;
 }
 
-static int get_breakpoint_format(gdb_BreakpointType type,
-                                 seL4_Word *break_type, seL4_Word *rw)
+static int get_breakpoint_format(gdb_breakpoint_t gdb_bkpt_type, 
+                                 seL4_BreakpointType *sel4_bkpt_type, 
+                                 seL4_BreakpointAccess *sel4_bkpt_access)
 {
     int err = 0;
-    ZF_LOGD("Breakpoint type %d", type);
-    switch (type) {
+    ZF_LOGD("Breakpoint type %d", gdb_bkpt_type);
+    switch (gdb_bkpt_type) 
+    {
 #ifdef CONFIG_HARDWARE_DEBUG_API
-    case gdb_HardwareBreakpoint:
-        *break_type = seL4_InstructionBreakpoint;
-        *rw = seL4_BreakOnRead;
+    case GDB_HardwareBreakpoint:
+        *sel4_bkpt_type = seL4_InstructionBreakpoint;
+        *sel4_bkpt_access = seL4_BreakOnRead;
         err = 0;
         break;
-    case gdb_WriteWatchpoint:
-        *break_type = seL4_DataBreakpoint;
-        *rw = seL4_BreakOnWrite;
+    case GDB_WriteWatchpoint:
+        *sel4_bkpt_type = seL4_DataBreakpoint;
+        *sel4_bkpt_access = seL4_BreakOnWrite;
         err = 0;
         break;
-    case gdb_ReadWatchpoint:
-        *break_type = seL4_DataBreakpoint;
-        *rw = seL4_BreakOnRead;
+    case GDB_ReadWatchpoint:
+        *sel4_bkpt_type = seL4_DataBreakpoint;
+        *sel4_bkpt_access = seL4_BreakOnRead;
         err = 0;
         break;
-    case gdb_AccessWatchpoint:
-        *break_type = seL4_DataBreakpoint;
-        *rw = seL4_BreakOnReadWrite;
+    case GDB_AccessWatchpoint:
+        *sel4_bkpt_type = seL4_DataBreakpoint;
+        *sel4_bkpt_access = seL4_BreakOnReadWrite;
         err = 0;
         break;
 #endif /* CONFIG_HARDWARE_DEBUG_API */
@@ -395,6 +470,7 @@ static int get_breakpoint_format(gdb_BreakpointType type,
         // Unknown type
         err = 1;
     }
+    
     return err;
 }
 
@@ -405,23 +481,23 @@ int gdb_handle_fault(gdb_state_t *gdb_state)
     case stop_watch:
         ZF_LOGD("Hit watchpoint");
         snprintf(watch_message, 49, "T05thread:01;watch:%08x;", gdb_state->stop_watch_addr);
-        send_message(watch_message, 0);
+        GDB_send_message(watch_message, 0);
         break;
     case stop_hw_break:
         ZF_LOGD("Hit breakpoint");
-        send_message("T05thread:01;hwbreak:;", 0);
+        GDB_send_message("T05thread:01;hwbreak:;", 0);
         break;
     case stop_step:
         ZF_LOGD("Did step");
-        send_message("T05thread:01;", 0);
+        GDB_send_message("T05thread:01;", 0);
         break;
     case stop_sw_break:
         ZF_LOGD("Software breakpoint");
-        send_message("T05thread:01;swbreak:;", 0);
+        GDB_send_message("T05thread:01;swbreak:;", 0);
         break;
     case stop_none:
         ZF_LOGE("Unknown stop reason");
-        send_message("T05thread:01;", 0);
+        GDB_send_message("T05thread:01;", 0);
         break;
     default:
         ZF_LOGF("Invalid stop reason.");
@@ -430,32 +506,39 @@ int gdb_handle_fault(gdb_state_t *gdb_state)
     return 0;
 }
 
-int handle_gdb(gdb_state_t *gdb_state)
+int gdb_handle(gdb_state_t *gdb_state)
 {
     // Get command and checksum
-    int command_length = buf.checksum_index - 1;
-    char *command_ptr = &buf.data[GDB_COMMAND_START_IDX];
+    const size_t cmd_length = (buf.checksum_index - 1);
+    const char *cmd_ptr = &buf.data[GDB_COMMAND_START_IDX];
+    const char *cmd_checksum = &buf.data[buf.checksum_index + 1];
+    const unsigned char cmd_checksum = (unsigned char) strtoul((&buf.data[buf.checksum_index + 1]),
+                                                         NULL,
+                                                         HEX_STRING_BASE);
+    // Copy command to local buffer
     char command[GETCHAR_BUFSIZ + 1] = {0};
-    strncpy(command, command_ptr, command_length);
-    char *checksum = &buf.data[buf.checksum_index + 1];
-    // Calculate checksum of data
+    strncpy(command, cmd_ptr, cmd_length);
     ZF_LOGD("command: %s", command);
-    unsigned char computed_checksum = compute_checksum(command,
-                                                       command_length);
-    unsigned char received_checksum = (unsigned char) strtol(checksum,
-                                                             NULL,
-                                                             HEX_STRING);
+    
+    // Calculate checksum of data
+    const unsigned char computed_checksum = compute_checksum(command, cmd_length);
+    const unsigned char received_checksum = (unsigned char) strtoul(cmd_checksum,
+                                                                    NULL,
+                                                                    HEX_STRING_BASE);
     if (computed_checksum != received_checksum) {
-        ZF_LOGD("Checksum error, computed %x,"
-                "received %x received_checksum\n",
-                computed_checksum, received_checksum);
-        // Acknowledge packet
+        
+        ZF_LOGW("Checksum error, computed %x, received %x \n", computed_checksum, received_checksum);
+        
+        // Nack packet
         gdb_printf(GDB_RESPONSE_START_STR GDB_NACK_STR GDB_RESPONSE_END_STR "\n");
+        
     } else {
-        // Acknowledge packet
+        
+        // Ack packet
         gdb_printf(GDB_RESPONSE_START_STR GDB_ACK_STR GDB_RESPONSE_END_STR "\n");
-        // Parse the command
-        handle_command(command, gdb_state);
+        
+        // Handle the command
+        GDB_handle_command(command, gdb_state);
     }
 
     return 0;
@@ -463,21 +546,19 @@ int handle_gdb(gdb_state_t *gdb_state)
 
 
 // Send a message with the GDB remote protocol
-static void send_message(char *message, int len)
+static void GDB_send_message(char *message, size_t len)
 {
-    int actual_len = strlen(message);
-    if (len == 0) {
-        len = actual_len + 1;
-        ZF_LOGD("Setting length %p", __builtin_return_address(0));
-    } else if ((actual_len + 1) != len) {
-        ZF_LOGE("message length invalid: %s, %d, %d, %p", message, len, actual_len, __builtin_return_address(0));
-    } else {
-        ZF_LOGD("Correct length %p", __builtin_return_address(0));
+    const size_t actual_len = strlen(message);
+    size_t msg_len = len;
+    
+    if ((len == 0) || (len != actual_len)) {
+        msg_len = actual_len;
     }
-    ZF_LOGD("message: %s", message);
-    unsigned char checksum = compute_checksum(message, len);
-    gdb_printf(GDB_RESPONSE_START_STR "$%s#%02X\n", message, checksum);
-    gdb_printf(GDB_RESPONSE_END_STR);
+    const unsigned char checksum = compute_checksum(message, msg_len);
+
+    ZF_LOGD("message (length %d, checksum %d): %s", msg_len, checksum, message);
+    
+    gdb_printf(GDB_RESPONSE_START_STR "$%s#%02X" GDB_RESPONSE_END_STR "\n", message, checksum);
 }
 
 
@@ -485,44 +566,50 @@ static void send_message(char *message, int len)
 // m[addr],[length]
 static void GDB_read_memory(char *command)
 {
-    int err;
-    char *token_ptr;
+    int err = 0;
+    char *save_ptr = NULL;
+    
     // Get args from command
-    char *addr_string = strtok_r(command, "m,", &token_ptr);
-    char *length_string = strtok_r(NULL, ",", &token_ptr);
+    char *addr_string = strtok_r(command, "m,", &save_ptr);
+    char *length_string = strtok_r(NULL, ",", &save_ptr);
+    
     // Convert strings to values
-    seL4_Word addr = (seL4_Word) strtol(addr_string, NULL, HEX_STRING);
-    seL4_Word length = (seL4_Word) strtol(length_string, NULL,
-                                          DEC_STRING);
+    seL4_Word addr = (seL4_Word) strtol(addr_string, NULL, HEX_STRING_BASE);
+    seL4_Word length = (seL4_Word) strtol(length_string, NULL, DEC_STRING_BASE);
+    
     if (length >= MAX_MEM_RANGE) {
         ZF_LOGE("Invalid read memory length %d", length);
-        send_message("E01", 0);
+        GDB_reply_e01();
         return;
     }
 
     if (addr == (seL4_Word) NULL) {
         ZF_LOGE("Bad memory address 0x%08x", addr);
-        send_message("E01", 0);
+        GDB_reply_e01();
         return;
     }
+    
     // Buffer for raw data
     delegate_mem_range_t data;
+    
     // Buffer for data formatted as hex string
-    size_t buf_len = CHAR_HEX_SIZE * length + 1;
-    char data_string[buf_len];
-    memset(data_string, 0, buf_len);
+    const size_t bufsz = (CHAR_HEX_SIZE * length) + 1;
+    char buffer[bufsz] = {0};
+
     // Do a read call to the GDB delegate who will read from memory
     // on our behalf
     err = delegate_read_memory(addr, length, &data);
 
     if (err) {
-        send_message("E01", 0);
+        ZF_LOGE("Could not read memory");
+        GDB_reply_e01();
     } else {
-        // Format the data
+        
+        // Write data as bytes
         for (int i = 0; i < length; i++) {
-            snprintf(&data_string[CHAR_HEX_SIZE * i], 3, "%02x", data.data[i] & 0xff);
+            snprintf(&buffer[CHAR_HEX_SIZE * i], 3, "%02x", data.data[i] & 0xff);
         }
-        send_message(data_string, buf_len);
+        GDB_send_message(buffer, bufsz);
     }
 }
 
@@ -537,18 +624,18 @@ static void GDB_write_memory(char *command)
     char *length_string = strtok_r(NULL, ",:", &token_ptr);
     char *data_string = strtok_r(NULL, ":", &token_ptr);
     // Convert strings to values
-    seL4_Word addr = (seL4_Word) strtol(addr_string, NULL, HEX_STRING);
-    seL4_Word length = (seL4_Word) strtol(length_string, NULL, DEC_STRING);
+    seL4_Word addr = (seL4_Word) strtol(addr_string, NULL, HEX_STRING_BASE);
+    seL4_Word length = (seL4_Word) strtol(length_string, NULL, DEC_STRING_BASE);
 
     if (length >= MAX_MEM_RANGE) {
         ZF_LOGE("Invalid read memory length %d", length);
-        send_message("E01", 0);
+        GDB_reply_e01();
         return;
     }
 
     if (addr == (seL4_Word) NULL) {
         ZF_LOGE("Bad memory address 0x%08x", addr);
-        send_message("E01", 0);
+        GDB_reply_e01();
         return;
     }
     // Buffer for data to be written
@@ -563,9 +650,9 @@ static void GDB_write_memory(char *command)
     // on our behalf
     err = delegate_write_memory(addr, length, data);
     if (err) {
-        send_message("E01", 0);
+        GDB_reply_e01();
     } else {
-        send_message("OK", 0);
+        GDB_reply_ok();
     }
 }
 
@@ -578,12 +665,12 @@ static void GDB_write_memory_binary(char *command)
     char *addr_string = strtok_r(command, "X,", &token_ptr);
     char *length_string = strtok_r(NULL, ",:", &token_ptr);
     // Convert strings to values
-    seL4_Word addr = strtol(addr_string, NULL, HEX_STRING);
-    seL4_Word length = strtol(length_string, NULL, DEC_STRING);
+    seL4_Word addr = strtol(addr_string, NULL, HEX_STRING_BASE);
+    seL4_Word length = strtol(length_string, NULL, DEC_STRING_BASE);
     delegate_mem_range_t data = {0};
     if (length == 0) {
         ZF_LOGW("Writing 0 length");
-        send_message("OK", 0);
+        GDB_reply_ok();
         return;
     }
 
@@ -591,7 +678,7 @@ static void GDB_write_memory_binary(char *command)
     // Copy the raw data to the expected location
     if (bin_data == NULL) {
         ZF_LOGE("data is NULL");
-        send_message("E01", 0);
+        GDB_reply_e01();
         return;
     }
     memcpy(&data.data, bin_data, length);
@@ -600,9 +687,9 @@ static void GDB_write_memory_binary(char *command)
     // on our behalf
     int err = delegate_write_memory(addr, length, data);
     if (err) {
-        send_message("E01", 0);
+        GDB_reply_e01();
     } else {
-        send_message("OK", 0);
+        GDB_reply_ok();
     }
 }
 
@@ -614,34 +701,34 @@ static void GDB_query(char *command)
     ZF_LOGD("query: %s", command);
     char *query_type = strtok_r(command, "q:", &token_ptr);
     if (strcmp("Supported", query_type) == 0) {// Setup argument storage
-        send_message("swbreak+;hwbreak+;PacketSize=100", 0);
+        GDB_send_message("swbreak+;hwbreak+;PacketSize=100", 0);
         // Most of these query messages can be ignored for basic functionality
     } else if (!strcmp("TStatus", query_type)) {
-        send_message("", 0);
+        GDB_send_message("", 0);
     } else if (!strcmp("TfV", query_type)) {
-        send_message("", 0);
+        GDB_send_message("", 0);
     } else if (!strcmp("C", query_type)) {
-        send_message("QC1", 0);
+        GDB_send_message("QC1", 0);
     } else if (!strcmp("Attached", query_type)) {
-        send_message("", 0);
+        GDB_send_message("", 0);
     } else if (!strcmp("fThreadInfo", query_type)) {
-        send_message("m01", 0);
+        GDB_send_message("m01", 0);
     } else if (!strcmp("sThreadInfo", query_type)) {
-        send_message("l", 0);
+        GDB_send_message("l", 0);
     } else if (!strcmp("Symbol", query_type)) {
-        send_message("", 0);
+        GDB_send_message("", 0);
     } else if (!strcmp("Offsets", query_type)) {
-        send_message("", 0);
+        GDB_send_message("", 0);
     } else {
         ZF_LOGD("Unrecognised query command");
-        send_message("E01", 0);
+        GDB_reply_e01();
     }
 }
 
 // Currently ignored
 static void GDB_set_thread(char *command)
 {
-    send_message("OK", 0);
+    GDB_reply_ok();
 }
 
 // Respond with the reason the thread being debuged stopped
@@ -649,126 +736,213 @@ static void GDB_stop_reason(char *command, gdb_state_t *gdb_state)
 {
     switch (gdb_state->stop_reason) {
     case stop_hw_break:
-        send_message("T05thread:01;hwbreak:;", 0);
+        GDB_send_message("T05thread:01;hwbreak:;", 0);
         break;
     case stop_sw_break:
-        send_message("T05thread:01;swbreak:;", 0);
+        GDB_send_message("T05thread:01;swbreak:;", 0);
         break;
     default:
-        send_message("T05thread:01;", 0);
+        GDB_send_message("T05thread:01;", 0);
     }
 }
 
 static void GDB_read_general_registers(char *command, gdb_state_t *gdb_state)
 {
-    // seL4_Word registers[x86_MAX_REGISTERS] = {0};
+    // Read seL4 registers from TCB
     seL4_UserContext registers = {0};
     delegate_read_registers(gdb_state->current_thread_tcb, &registers);
-    int buf_len = x86_MAX_REGISTERS * sizeof(seL4_Word) * CHAR_HEX_SIZE + 1;
-    char data[buf_len];
-    memset(data, 0, buf_len);
-    // Read the register data from the buffer and marshall into a string
-    // to send back to GDB, making sure the byte order is correct
-    for (int i = 0; i < x86_MAX_REGISTERS; i++) {
-        seL4_Word seL4_reg_num = x86_GDB_Register_to_seL4_UserContext(i);
-        seL4_Word value;
-        if (seL4_reg_num == -1) {
-            ZF_LOGW("Invalid register number");
-            value = 0;
+    
+    // Create and zero a print buffer
+    const size_t bufsz = (NUM_GDB_REGISTERS * SEL4_REGISTER_WIDTH_CHARS) + 1;
+    char buffer[bufsz] = {0};
+    
+    // Marshall register data into a string to send back to GDB, 
+    // making sure the byte order is correct
+    for (int i = 0; i < NUM_GDB_REGISTERS; i++) {
+        
+        bool havevalue = false;
+        seL4_Word value = 0;
+        seL4_Word sel4_reg_idx = gdb_register_idx_to_sel4_usercontext_idx(i);
+        
+        if (INVALID_SEL4_REGISTER_IDX == sel4_reg_idx) {
+            ZF_LOGW("GDB wants to read register %d which seL4 doesn't have", i);
         } else {
-            value = ((seL4_Word *)&registers)[seL4_reg_num];
+            
+            int res = get_sel4_register_value(registers, &value, sel4_reg_idx);
+            
+            if (res) {
+                havevalue = true;
+                ZF_LOGD("Read value %0*x from seL4 register %d", 
+                        SEL4_REGISTER_WIDTH_CHARS, 
+                        value, 
+                        sel4_reg_idx);
+            } else {
+                ZF_LOGW("Could not read value from seL4 register %d", sel4_reg_idx);
+            } 
         }
-        sprintf(data + sizeof(seL4_Word) * CHAR_HEX_SIZE * i,
-                "%0*x", seL4_WordBits / 4, BSWAP_WORD(value));
+        
+        const size_t offset = (SEL4_REGISTER_WIDTH_CHARS * i);
+        
+        if (havevalue) {
+            
+            // Set correct byte order if needed, else nop
+            value = handle_endian_swap(value);
+
+            snprintf((buffer + offset), 
+                     (SEL4_REGISTER_WIDTH_CHARS + 1), 
+                     "%0*x", 
+                     SEL4_REGISTER_WIDTH_CHARS, 
+                     value);
+        } else {
+            
+            // TODO: GDB remote serial protocol understands 
+            // register values filled with 'x' chars as not available
+            // in some cases. See if it is true in all cases
+            snprintf((buffer + offset), (SEL4_REGISTER_WIDTH_CHARS + 1), "%s", SEL4_REGISTER_UNKNOWN_VALUE);
+        }
     }
-    send_message(data, buf_len);
+    
+    GDB_send_message(buffer, bufsz);
 }
 
 // GDB read register command format:
 // p[reg_num]
 static void GDB_read_register(char *command, gdb_state_t *gdb_state)
 {
-    seL4_Word reg;
-    char *token_ptr;
+    char *save_ptr = NULL;
+    
     // Get which register we want to read
-    char *reg_string = strtok_r(&command[GDB_COMMAND_START_IDX], "", &token_ptr);
-    if (reg_string == NULL) {
-        send_message("E00", 0);
+    char *reg_string = strtok_r(&command[GDB_COMMAND_START_IDX], "", &save_ptr);
+    if (NULL == reg_string) {
+        GDB_reply_e00();
         return;
     }
-    seL4_Word reg_num = strtol(reg_string, NULL, HEX_STRING);
-    if (reg_num >= x86_VALID_REGISTERS) {
-        send_message("E00", 0);
+    
+    seL4_Word reg_num = strtol(reg_string, NULL, HEX_STRING_BASE);
+    if (reg_num >= NUM_GDB_REGISTERS) {
+        GDB_reply_e00();
         return;
     }
+    
+    seL4_Word value = 0;
+    
     // Convert to the register order we have
-    seL4_Word seL4_reg_num = x86_GDB_Register_to_seL4_UserContext(reg_num);
-    if (seL4_reg_num == -1) {
+    seL4_Word sel4_reg_idx = gdb_register_idx_to_sel4_usercontext_idx(reg_num);
+    
+    if (INVALID_SEL4_REGISTER_IDX == sel4_reg_idx) {
         ZF_LOGE("Invalid GDB register number: %d", reg_num);
-        send_message("E00", 0);
+        GDB_reply_e00();
         return;
     } else {
-        delegate_read_register(gdb_state->current_thread_tcb, &reg, seL4_reg_num);
+        delegate_read_register(gdb_state->current_thread_tcb, &value, sel4_reg_idx);
     }
-    int buf_len = sizeof(seL4_Word) * CHAR_HEX_SIZE + 1;
-    char data[buf_len];
-    data[buf_len - 1] = 0;
-    // Send the register contents as a string, making sure
-    // the byte order is correct
-    sprintf(data, "%0*x", seL4_WordBits / 4, BSWAP_WORD(reg));
-    send_message(data, buf_len);
+    
+    // Create and zero a print buffer
+    const size_t bufsz = SEL4_REGISTER_WIDTH_CHARS + 1;
+    char buffer[bufsz] = {0};
+    
+    // Marshall register data into a string to send back to GDB, 
+    // making sure the byte order is correct
+    
+    // Set correct byte order if needed, else nop
+    value = handle_endian_swap(value);
+
+    snprintf(buffer, 
+             (size_t)(SEL4_REGISTER_WIDTH_CHARS + 1), 
+             "%0*x", 
+             SEL4_REGISTER_WIDTH_CHARS, 
+             value);
+    
+    GDB_send_message(buffer, bufsz);
 }
 
 static void GDB_write_general_registers(char *command, gdb_state_t *gdb_state)
 {
-    char *token_ptr;
+    char *save_ptr = NULL;
+    
     // Get args from command
-    char *data_string = strtok_r(&command[GDB_COMMAND_START_IDX], "", &token_ptr);
-    // Truncate data to register length
-    int num_regs = sizeof(seL4_UserContext) / sizeof(seL4_Word);
-    int num_regs_data = (strlen(data_string)) / (sizeof(seL4_Word) * 2);
-    if (num_regs_data > num_regs) {
-        num_regs_data = num_regs;
-    }
+    char *regs_string = strtok_r(&command[GDB_COMMAND_START_IDX], "", &save_ptr);
+    
+    // Truncate GDB data to # of actual registers available
+    const size_t num_sel4_regs = NUM_SEL4_REGISTERS;
+    const size_t num_input_regs = (strlen(regs_string) / SEL4_REGISTER_WIDTH_CHARS);
+    const size_t num_regs = (num_input_regs > num_sel4_regs ? num_sel4_regs : num_input_regs);
+
     // Marshall data
-    seL4_UserContext data;
-    for (int i = 0; i < num_regs_data; i++) {
-        seL4_Word seL4_register_number = x86_GDB_Register_to_seL4_UserContext(i);
-        string_to_word_data(&data_string[2 * i * sizeof(seL4_Word)], ((seL4_Word *)&data) + seL4_register_number);
-        ((seL4_Word *)&data)[seL4_register_number] = BSWAP_WORD(((seL4_Word *)&data)[seL4_register_number]);
+    seL4_UserContext regs = {0};
+    
+    for (int i = 0; i < num_regs; i++) {
+
+        seL4_Word sel4_reg_idx = gdb_register_idx_to_sel4_usercontext_idx(i);
+        
+        if (INVALID_SEL4_REGISTER_IDX == sel4_reg_idx) {
+            ZF_LOGW("GDB wants to read register %d which seL4 doesn't have", i);
+        } else {
+            // Parse value and write it to seL4_UserContext structure
+            seL4_Word value = parse_word_from_str((regs_string + (SEL4_REGISTER_WIDTH_CHARS * i), HEX_STRING_BASE);
+            
+            // Set correct byte order if needed, else nop
+            value = handle_endian_swap(value);
+            
+            // Write value
+            int res = set_sel4_register_value(regs, value, sel4_reg_idx);
+            
+            if(!res) {
+                ZF_LOGW("Could not write value %0*x to seL4 register %d", 
+                        SEL4_REGISTER_WIDTH_CHARS, 
+                        value, 
+                        sel4_reg_idx);
+            }
+        }
     }
-    delegate_write_registers(gdb_state->current_thread_tcb, data, num_regs_data);
-    gdb_state->current_pc = data.eip;
-    send_message("OK", 0);
+    
+    // Write new values to TCB, update program counter
+    // and reply to GDB
+    delegate_write_registers(gdb_state->current_thread_tcb, regs, num_regs);
+    gdb_state_update_pc(gdb_state, regs);
+    
+    GDB_reply_ok();
 }
 
 // GDB write register command format:
 // P[reg_num]=[data]
 static void GDB_write_register(char *command, gdb_state_t *gdb_state)
 {
-    char *token_ptr;
-    // Parse arguments
-    char *reg_string = strtok_r(&command[GDB_COMMAND_START_IDX], "=", &token_ptr);
-    char *data_string = strtok_r(NULL, "", &token_ptr);
+    char *save_ptr = NULL;
+    
+    // Get args from command
+    char *reg_string = strtok_r(&command[GDB_COMMAND_START_IDX], "=", &save_ptr);
+    char *data_string = strtok_r(NULL, "", &save_ptr);
+    
     // If valid register, do something, otherwise reply OK
-    seL4_Word reg_num = strtol(reg_string, NULL, HEX_STRING);
-    if (reg_num < x86_GDB_REGISTERS) {
-        // Convert arguments
-        seL4_Word data;
-        string_to_word_data(data_string, &data);
-        data = BSWAP_WORD(data);
+    seL4_Word gdb_reg_num = strtol(reg_string, NULL, HEX_STRING_BASE);
+    
+    if (gdb_reg_num < NUM_GDB_REGISTERS) {
+        
+        // Parse value and write it to seL4_UserContext structure
+        seL4_Word value = parse_word_from_str(data_string, HEX_STRING_BASE);
+
+        // Set correct byte order if needed, else nop
+        value = handle_endian_swap(value);
+
         // Convert to register order we have
-        seL4_Word seL4_reg_num = x86_GDB_Register_to_seL4_UserContext(reg_num);
-        if (seL4_reg_num == -1) {
-            ZF_LOGE("Invalid GDB register number: %d, ignoring write", reg_num);
+        seL4_Word sel4_reg_idx = gdb_register_idx_to_sel4_usercontext_idx(gdb_reg_num);
+        
+        if (INVALID_SEL4_REGISTER_IDX == sel4_reg_idx) {
+            ZF_LOGW("GDB wants to read register %d which seL4 doesn't have", i);
         } else {
-            delegate_write_register(gdb_state->current_thread_tcb, data, seL4_reg_num);
-            if (reg_num == GDBRegister_eip) {
-                gdb_state->current_pc = data;
+            
+            delegate_write_register(gdb_state->current_thread_tcb, value, sel4_reg_idx);
+            
+            // If the register was program counter,
+            // update GDB's copy of it too
+            if (PROGRAM_COUNTER_REG == gdb_reg_num) {
+                gdb_state->current_pc = value;
             }
         }
     }
-    send_message("OK", 0);
+    
+    GDB_reply_ok();
 }
 
 static void GDB_vcont(char *command, gdb_state_t *gdb_state)
@@ -778,22 +952,25 @@ static void GDB_vcont(char *command, gdb_state_t *gdb_state)
     } else if (!strncmp(&command[7], "s", 1)) {
         GDB_step(command, gdb_state);
     } else {
-        send_message("", 0);
+        GDB_reply_empty();
     }
 }
 
 static void GDB_continue(char *command, gdb_state_t *gdb_state)
 {
     int err = 0;
+    
     // If it's not a step exception, then we can resume
     // Otherwise, just resume by responding on the step fault
-    if (gdb_state->current_thread_step_mode && gdb_state->stop_reason != stop_step) {
+    if (gdb_state->current_thread_step_mode 
+    && (gdb_state->stop_reason != stop_step)) {
         err = delegate_resume(gdb_state->current_thread_tcb);
     }
     gdb_state->current_thread_step_mode = false;
+    
     if (err) {
-        ZF_LOGE("delegate resume failed\n");
-        send_message("E01", 0);
+        ZF_LOGE("GDB delegate resume failed: %d", err);
+        GDB_reply_e01();
     }
 
     gdb_state->sem_post();
@@ -802,19 +979,23 @@ static void GDB_continue(char *command, gdb_state_t *gdb_state)
 static void GDB_step(char *command, gdb_state_t *gdb_state)
 {
     int err = 0;
+    
     // If it's not a step exception, then we need to set stepping
     // Otherwise, just step by responding on the step fault
-    if (!gdb_state->current_thread_step_mode && gdb_state->stop_reason != stop_step) {
+    if (!gdb_state->current_thread_step_mode 
+    && (gdb_state->stop_reason != stop_step)) {
         ZF_LOGD("Entering step mode");
         err = delegate_step(gdb_state->current_thread_tcb);
     } else {
         ZF_LOGD("Already in step mode");
     }
     gdb_state->current_thread_step_mode = true;
+    
     if (err) {
-        ZF_LOGE("delegate step failed\n");
-        send_message("E01", 0);
+        ZF_LOGE("GDB delegate step failed");
+        GDB_reply_e01();
     }
+    
     gdb_state->sem_post();
 }
 
@@ -822,53 +1003,52 @@ static void GDB_step(char *command, gdb_state_t *gdb_state)
 // Z[type],[addr],[size]
 static void GDB_breakpoint(char *command, bool insert, gdb_state_t *gdb_state)
 {
-    char *token_ptr;
-    seL4_Word break_type;
-    seL4_Word rw;
+    char *save_ptr = NULL;
+
     // Parse arguments
-    char *type_string = strtok_r(&command[GDB_COMMAND_START_IDX], ",", &token_ptr);
-    char *addr_string = strtok_r(NULL, ",", &token_ptr);
-    char *size_string = strtok_r(NULL, ",", &token_ptr);
+    char *type_string = strtok_r(&command[GDB_COMMAND_START_IDX], ",", &save_ptr);
+    char *addr_string = strtok_r(NULL, ",", &save_ptr);
+    char *size_string = strtok_r(NULL, ",", &save_ptr);
+    
     // Convert strings to values
-    seL4_Word type = (seL4_Word) strtol(type_string, NULL, HEX_STRING);
-    seL4_Word addr = (seL4_Word) strtol(addr_string, NULL, HEX_STRING);
-    seL4_Word size = (seL4_Word) strtol(size_string, NULL, HEX_STRING);
-    ZF_LOGD("Breakpoint: %s, type: %d, addr: 0x%x, size %d", insert ? "'insert'" : "'remove'", type, addr, size);
-    // If this is a software breakpoint, then we will ignore
-    // By ignoring this command, GDB will just use the read and write
-    // memory commands to set a breakpoint itself. This can later be changed
-    // if setting software breakpoints becomes supported by the kernel.
-    if (type == gdb_SoftwareBreakpoint) {
-        send_message("", 0);
-    } else {
-        int err;
-        err = get_breakpoint_format(type, &break_type, &rw);
-        if (!err) {
-            // Hardware breakpoints can only be size 0
-            if (type == gdb_HardwareBreakpoint) {
-                size = 0;
-            }
-            if (insert) {
-                err = delegate_insert_break(gdb_state->current_thread_tcb, break_type,
-                                            addr, size,
-                                            rw);
-            } else {
-                err = delegate_remove_break(gdb_state->current_thread_tcb, break_type,
-                                            addr, size,
-                                            rw);
-            }
-        }
-        if (err) {
-            ZF_LOGE("Couldn't set breakpoint");
-            send_message("E01", 0);
+    seL4_Word type = (seL4_Word) strtol(type_string, NULL, HEX_STRING_BASE);
+    seL4_Word addr = (seL4_Word) strtol(addr_string, NULL, HEX_STRING_BASE);
+    seL4_Word size = (seL4_Word) strtol(size_string, NULL, HEX_STRING_BASE);
+    seL4_BreakpointType sel4_bkpt_type = 0;
+    seL4_BreakpointAccess sel4_bkpt_access = 0;
+    
+    ZF_LOGD("Breakpoint: %s, type: %d, addr: 0x%x, size %d", 
+            insert ? "'insert'" : "'remove'", type, addr, size);
+    
+    int err = get_breakpoint_format(type, &sel4_bkpt_type, &sel4_bkpt_access);
+    
+    if (!err) {
+        
+        if (insert) {
+            err = delegate_insert_break(gdb_state->current_thread_tcb, 
+                                        sel4_bkpt_type,
+                                        addr, 
+                                        size,
+                                        sel4_bkpt_access);
         } else {
-            send_message("OK", 0);
+            err = delegate_remove_break(gdb_state->current_thread_tcb, 
+                                        sel4_bkpt_type,
+                                        addr, 
+                                        size,
+                                        sel4_bkpt_access);
         }
+    }
+    
+    if (err) {
+        ZF_LOGE("Couldn't set breakpoint");
+        GDB_reply_e01();
+    } else {
+        GDB_reply_ok();
     }
 }
 
 
-static int handle_command(char *command, gdb_state_t *gdb_state)
+static int GDB_handle_command(char *command, gdb_state_t *gdb_state)
 {
     switch (command[0]) {
     case '!':
@@ -980,13 +1160,13 @@ static int handle_command(char *command, gdb_state_t *gdb_state)
         break;
     case 'v':
         if (!strncmp(&command[GDB_COMMAND_START_IDX], "Cont?", 5)) {
-            send_message("vCont;c;s", 0);
+            GDB_send_message("vCont;c;s", 0);
         } else if (!strncmp(&command[GDB_COMMAND_START_IDX], "Cont", 4)) {
             GDB_vcont(command, gdb_state);
         } else if (!strncmp(&command[GDB_COMMAND_START_IDX], "Kill", 4)) {
-            send_message("", 0);
+            GDB_send_message("", 0);
         } else if (!strncmp(&command[GDB_COMMAND_START_IDX], "MustReplyEmpty", 14)) {
-            send_message("", 0);
+            GDB_send_message("", 0);
         } else {
             ZF_LOGE("Command not supported");
         }

@@ -13,10 +13,10 @@
 #include <camkes/gdb/delegate_types.h>
 
 
-#define GDB_COMMAND_START_IDX           1
-#define HEX_STRING                      16
-#define DEC_STRING                      10
-#define CHAR_HEX_SIZE                   2
+#define GDB_COMMAND_START_IDX         (1)  // GDB commands start from 2nd char
+#define HEX_STRING_BASE               (16)
+#define DEC_STRING_BASE               (10)
+#define CHAR_HEX_SIZE                 (2)  // # of chars to represent 1 hex byte
 
 // Colour coded response start/end
 //#define GDB_RESPONSE_START_STR      "\x1b[31m"
@@ -29,19 +29,6 @@
 #define GDB_ACK_STR                   "+"
 #define GDB_NACK_STR                  "-"
 
-#if defined(CONFIG_ARCH_IA32)
-
-#define x86_VALID_REGISTERS     10
-#define x86_GDB_REGISTERS       13
-#define x86_MAX_REGISTERS       16
-#define x86_INVALID_REGISTER    10
-
-#endif
-// CONFIG_ARCH_AARCH32
-// CONFIG_ARCH_AARCH64
-// CONFIG_ARCH_X86_64
-// CONFIG_ARCH_RISCV
-
 
 typedef enum {
     stop_none,
@@ -52,12 +39,12 @@ typedef enum {
 } stop_reason_t;
 
 typedef enum {
-    gdb_SoftwareBreakpoint,
-    gdb_HardwareBreakpoint,
-    gdb_WriteWatchpoint,
-    gdb_ReadWatchpoint,
-    gdb_AccessWatchpoint
-} gdb_BreakpointType;
+    GDB_SoftwareBreakpoint,
+    GDB_HardwareBreakpoint,
+    GDB_WriteWatchpoint,
+    GDB_ReadWatchpoint,
+    GDB_AccessWatchpoint
+} gdb_breakpoint_t;
 
 #define GETCHAR_BUFSIZ 512
 
@@ -98,5 +85,5 @@ int delegate_step(seL4_Word tcb_cap);
 
 
 
-int handle_gdb(gdb_state_t *gdb_state);
+int gdb_handle(gdb_state_t *gdb_state);
 int gdb_handle_fault(gdb_state_t *gdb_state);
