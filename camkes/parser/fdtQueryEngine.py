@@ -8,6 +8,7 @@
 #
 import argparse
 
+import copy
 import os
 import six
 import re
@@ -413,17 +414,62 @@ class DtbMatchQuery(Query):
         self.engine = None
 
     @staticmethod
-    def addr_xlat(resolved):
-        # TODO: use 'this-ranges' property to map correctly
-        if (resolved['reg'][0] == 0x7e215040):
-            resolved['reg'][0] = 0xfe215040
-        elif (resolved['reg'][1] == 0x7d580000):
-            resolved['reg'][1] = 0xfd580000
+    def combine_cells(cells, size):
+        x = 0
+        for n in range(size):
+            x <<= 32
+            x |= cells.pop(0)
+        return x, cells
+
+    @staticmethod
+    def break_cells(x, size):
+        result = []
+        if size > 1:
+            result = DtbMatchQuery.break_cells(x >> 32, size - 1)
+        result.append(x & ((1 << 32) - 1))
+        return result
+
+    @staticmethod
+    def addr_xlat(cells):
+        regs = copy.deepcopy(cells['reg'])
+        ranges = copy.deepcopy(cells['this-ranges'])
+        ranges_combined = []
+
+        xlat_errors = False
+
+        while ranges:
+            this_addr, ranges = DtbMatchQuery.combine_cells(ranges, cells['this-address-cells'][0])
+            parent_addr, ranges = DtbMatchQuery.combine_cells(ranges, cells['parent-address-cells'][0])
+            size, ranges = DtbMatchQuery.combine_cells(ranges, cells['this-size-cells'][0])
+            ranges_combined.append((this_addr, parent_addr, size))
+
+        cells['reg'] = []
+
+        while regs:
+            addr, regs = DtbMatchQuery.combine_cells(regs, cells['this-address-cells'][0])
+            size, regs = DtbMatchQuery.combine_cells(regs, cells['this-size-cells'][0])
+            print('device address 0x%x, 0x%x bytes' % (addr, size))
+            for r in ranges_combined:
+                if addr >= r[0] and addr <= r[0] + r[2] - 1:
+                    last_addr = addr + size - 1
+                    if last_addr < r[0] + r[2]:
+                        addr = r[1] + (addr - r[0])
+                        print('translated address is: ', end='')
+                        # TODO: make sure these don't overflow in parent cells are bigger
+                        new_regs = DtbMatchQuery.break_cells(addr, cells['this-address-cells'][0])
+                        new_regs.extend(DtbMatchQuery.break_cells(size, cells['this-size-cells'][0]))
+                        print([('0x%x' % x) for x in new_regs])
+                        cells['reg'].extend(new_regs)
+                    else:
+                        xlat_errors = True
+                        logging.warn('Ignoring range 0x%x/0x%x, device reg 0x%x/0x%x does not fit' % (r[0], r[2], addr, size))
 
     @staticmethod
     def resolve_fdt_node(node):
         resolved = {}
 
+        parent_address_cells_key = 'parent-address-cells'
+        parent_size_cells_key = 'parent-size-cells'
         address_cells_key = 'this-address-cells'
         size_cells_key = 'this-size-cells'
         node_path_key = 'this-node-path'
@@ -452,6 +498,15 @@ class DtbMatchQuery(Query):
                 resolved[size_cells_key] = list(values)
             elif key == 'ranges':
                 resolved[ranges_key] = list(values)
+        # for 'ranges', we need the cell sizes for the parent bus,
+        # the child bus is the parent of the current node
+        for p in node.parent.parent.walk():
+            key = p[0][1:]
+            values = p[1]
+            if key == '#address-cells':
+                resolved[parent_address_cells_key] = list(values)
+            elif key == '#size-cells':
+                resolved[size_cells_key] = list(values)
 
         # if the parent does have the #address-cells and
         # #size-cells property, default to 2 and 1 respectively
@@ -460,6 +515,13 @@ class DtbMatchQuery(Query):
             resolved[address_cells_key] = [2]
         if size_cells_key not in resolved:
             resolved[size_cells_key] = [1]
+        if parent_address_cells_key not in resolved:
+            resolved[parent_address_cells_key] = [2]
+        if parent_size_cells_key not in resolved:
+            resolved[parent_size_cells_key] = [1]
+
+        if ranges_key in resolved:
+            DtbMatchQuery.addr_xlat(resolved)
         # Resolve the full path of the fdt node by walking backwards
         # to the root of the device tree
         curr_node = node
@@ -473,7 +535,6 @@ class DtbMatchQuery(Query):
             curr_node = curr_node.parent
         node_path = '/' + node_path
         resolved[node_path_key] = node_path
-        DtbMatchQuery.addr_xlat(resolved)
         return resolved
 
     def resolve(self, args):
