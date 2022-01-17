@@ -439,8 +439,6 @@ class DtbMatchQuery(Query):
         ranges = copy.deepcopy(cells['this-ranges'])
         ranges_combined = []
 
-        xlat_errors = False
-
         while ranges:
             this_addr, ranges = DtbMatchQuery.combine_cells(ranges, cells['this-address-cells'][0])
             parent_addr, ranges = DtbMatchQuery.combine_cells(ranges, cells['parent-address-cells'][0])
@@ -465,7 +463,6 @@ class DtbMatchQuery(Query):
                         print([('0x%x' % x) for x in new_regs])
                         cells['reg'].extend(new_regs)
                     else:
-                        xlat_errors = True
                         logging.warn('Ignoring range 0x%x/0x%x, device reg 0x%x/0x%x does not fit' % (r[0], r[2], addr, size))
 
     @staticmethod
