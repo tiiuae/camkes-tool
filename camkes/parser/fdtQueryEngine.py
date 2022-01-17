@@ -431,6 +431,10 @@ class DtbMatchQuery(Query):
 
     @staticmethod
     def addr_xlat(cells):
+        if not 'reg' in cells:
+            # no 'reg', nothing to translate
+            return
+
         regs = copy.deepcopy(cells['reg'])
         ranges = copy.deepcopy(cells['this-ranges'])
         ranges_combined = []
@@ -520,8 +524,9 @@ class DtbMatchQuery(Query):
         if parent_size_cells_key not in resolved:
             resolved[parent_size_cells_key] = [1]
 
-        if ranges_key in resolved:
+        if 'reg' in resolved and ranges_key in resolved:
             DtbMatchQuery.addr_xlat(resolved)
+
         # Resolve the full path of the fdt node by walking backwards
         # to the root of the device tree
         curr_node = node
