@@ -501,13 +501,14 @@ class DtbMatchQuery(Query):
                 resolved[ranges_key] = list(values)
         # for 'ranges', we need the cell sizes for the parent bus,
         # the child bus is the parent of the current node
-        for p in node.parent.parent.walk():
-            key = p[0][1:]
-            values = p[1]
-            if key == '#address-cells':
-                resolved[parent_address_cells_key] = list(values)
-            elif key == '#size-cells':
-                resolved[parent_size_cells_key] = list(values)
+        if node.parent.parent:
+            for p in node.parent.parent.walk():
+                key = p[0][1:]
+                values = p[1]
+                if key == '#address-cells':
+                    resolved[parent_address_cells_key] = list(values)
+                elif key == '#size-cells':
+                    resolved[parent_size_cells_key] = list(values)
 
         # if the parent does have the #address-cells and
         # #size-cells property, default to 2 and 1 respectively
