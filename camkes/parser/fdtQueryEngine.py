@@ -507,7 +507,7 @@ class DtbMatchQuery(Query):
             if key == '#address-cells':
                 resolved[parent_address_cells_key] = list(values)
             elif key == '#size-cells':
-                resolved[size_cells_key] = list(values)
+                resolved[parent_size_cells_key] = list(values)
 
         # if the parent does have the #address-cells and
         # #size-cells property, default to 2 and 1 respectively
