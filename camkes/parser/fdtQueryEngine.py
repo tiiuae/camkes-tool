@@ -451,6 +451,7 @@ class DtbMatchQuery(Query):
             addr, regs = DtbMatchQuery.combine_cells(regs, cells['this-address-cells'][0])
             size, regs = DtbMatchQuery.combine_cells(regs, cells['this-size-cells'][0])
             print('device address 0x%x, 0x%x bytes' % (addr, size))
+            translated = False
             for r in ranges_combined:
                 if addr >= r[0] and addr <= r[0] + r[2] - 1:
                     last_addr = addr + size - 1
@@ -462,8 +463,16 @@ class DtbMatchQuery(Query):
                         new_regs.extend(DtbMatchQuery.break_cells(size, cells['this-size-cells'][0]))
                         print([('0x%x' % x) for x in new_regs])
                         cells['reg'].extend(new_regs)
+                        translated = True
                     else:
                         logging.warn('Ignoring range 0x%x/0x%x, device reg 0x%x/0x%x does not fit' % (r[0], r[2], addr, size))
+
+            if not translated:
+                new_regs = DtbMatchQuery.break_cells(addr, cells['this-address-cells'][0])
+                new_regs.extend(DtbMatchQuery.break_cells(size, cells['this-size-cells'][0]))
+                print([('0x%x' % x) for x in new_regs])
+                cells['reg'].extend(new_regs)
+
 
     @staticmethod
     def resolve_fdt_node(node):
