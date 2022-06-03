@@ -519,13 +519,17 @@ class DtbMatchQuery(Query):
 
             for p in parent.walk() if parent else []:
                 key = p[0][1:]
-                values = p[1]
+                if type(p[1]) is pyfdt.pyfdt.FdtProperty:
+                    values = []
+                else:
+                    values = list(p[1])
+
                 if key == '#address-cells':
-                    bus['this-address-cells'] = list(values)[0]
+                    bus['this-address-cells'] = values[0]
                 elif key == '#size-cells':
-                    bus['this-size-cells'] = list(values)[0]
+                    bus['this-size-cells'] = values[0]
                 elif key == 'ranges':
-                    bus['ranges'] = list(values)
+                    bus['ranges'] = values
 
             # if the parent does not have the #address-cells and
             # #size-cells properties, default to 2 and 1 respectively
