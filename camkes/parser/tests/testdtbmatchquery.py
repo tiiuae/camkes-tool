@@ -14,12 +14,13 @@ from camkes.internal.tests.utils import CAmkESTest
 import os
 import sys
 import unittest
+import logging
+import pprint as pp
 
 ME = os.path.abspath(__file__)
 
 # Make CAmkES importable
 sys.path.append(os.path.join(os.path.dirname(ME), '../../..'))
-
 
 class TestDTBMatchQuery(CAmkESTest):
     '''
@@ -39,10 +40,31 @@ class TestDTBMatchQuery(CAmkESTest):
         self.dtbQuery.check_options()
         self.dtbSize = os.path.getsize(os.path.join(os.path.dirname(ME), "test.dtb"))
 
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.DEBUG)
+
+        stream_handler = logging.StreamHandler(sys.stdout)
+        #formatter = logging.Formatter('%(name)s - %(levelname)s - %(filename)s:%(lineno)s - %(funcName)% || %(message)s')
+        formatter = logging.Formatter('%(name)s - %(levelname)s : %(message)s')
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+
+        self.logger = logger
+        self.stream_handler = stream_handler
+
+    def tearDown(self):
+        super().tearDown()
+        self.logger.removeHandler(self.stream_handler)
+
+    def debug_query(self, query, expected, result):
+        self.logger.debug("Query:    \n\n{0}".format(pp.pformat(query, indent=4)))
+        self.logger.debug("Expected: \n\n{0}".format(pp.pformat(expected, indent=4)))
+        self.logger.debug("Result:   \n\n{0}".format(pp.pformat(result, indent=4)))
+
     def test_aliases(self):
         node = self.dtbQuery.resolve([{'aliases': 'usbphy0'}])
         self.assertIsInstance(node, dict)
-
+    
         expected = {
             'compatible': ["fsl,imx6q-usbphy", "fsl,imx23-usbphy"],
             'reg': [0x20c9000, 0x1000],
@@ -54,6 +76,9 @@ class TestDTBMatchQuery(CAmkESTest):
             'this-size-cells': [0x1],
             'this-node-path': "/soc/aips-bus@2000000/usbphy@20c9000",
         }
+
+        self.debug_query([{'aliases': 'usbphy0'}], expected, node['query'][0])
+
         self.assertIn('query', node)
         self.assertIn('dtb-size', node)
         self.assertEquals(len(node['query']), 1)
@@ -77,6 +102,8 @@ class TestDTBMatchQuery(CAmkESTest):
             'this-node-path': "/soc/aips-bus@2000000/spba-bus@2000000/ecspi@2018000",
         }
 
+        self.debug_query([{'aliases': 'spi4'}], expected, node['query'][0])
+    
         self.assertIn('query', node)
         self.assertEquals(node['query'][0], expected)
         self.assertEquals(len(node['query']), 1)
